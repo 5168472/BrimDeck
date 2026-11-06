@@ -83,7 +83,22 @@ public partial class MainWindow : Window
     internal void FirstReadEnded() { if (_firstReadEnded) return; _firstReadEnded = true; _usageBuilt = null; }
     public string? LastRefreshError { get; private set; }
 
-    private sealed record CompactAlertInfo(AppEntry Entry, string Name, string Label, double Used, DateTimeOffset? ResetAt);
+    // What the collapsed island briefly shows in place of its usual row. A quota notice carries the application whose
+    // threshold it crossed, the share it reached and when that quota resets; a message notice carries the chat app, what
+    // the app could read of the message, and no percentage. Both replace the row for a few seconds.
+    private sealed record CompactAlertInfo(AppEntry? Entry, string Name, string Label, double Used, DateTimeOffset? ResetAt)
+    {
+        // A message notice: no quota, so no ring share and no reset time. The label carries the text the source could read.
+        public ChatApp? Chat { get; init; }
+        public static CompactAlertInfo Message(ChatApp app, string sender, string text) =>
+            new(null, Loc.T(AppLabel(app), AppLabel(app)), text, 0, null) { Chat = app };
+        private static string AppLabel(ChatApp app) => app switch
+        {
+            ChatApp.Feishu => Loc.T("飞书", "Feishu"),
+            ChatApp.WeCom => Loc.T("企业微信", "WeCom"),
+            _ => Loc.T("微信", "WeChat")
+        };
+    }
 
     public MainWindow(App app, MainWindow? lead = null)
     {
@@ -177,7 +192,16 @@ public partial class MainWindow : Window
         // The collapsed island opens on hover, so a right click there does nothing, except leave move mode.
         MouseWheel += PanelWheel;
         MouseRightButtonUp += (_, e) => { if (_moveArmed) { CancelMove(); e.Handled = true; return; } if (!_expanded || !Settings.RightClickSettings) return; _app.OpenSettings(); e.Handled = true; };
-        PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { SetExpanded(false, keyboard: true); e.Handled = true; } };
+        PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Escape) { SetExpanded(false, keyboard: true); e.Handled = true; return; }
+            // On the calendar page the left and right arrows step the month, which is the same thing the arrows beside
+            // its name do: a step is something a reader does over and over, and reaching for a 20-pixel target each
+            // time is the part of it that is work.
+            if (!_expanded || !IsCalendarPage) return;
+            if (e.Key == Key.Left) { StepMonth(-1); e.Handled = true; }
+            else if (e.Key == Key.Right) { StepMonth(1); e.Handled = true; }
+        };
         // A scale change moves the window to a rectangle Windows suggests; the island is centred again.
         // DpiChanged is a bubbling event: every Image raises it when its own DPI changes. Once the window has moved to a
         // monitor with another scale, each image the panel rebuilds while it is laid out reports a change, and laying out
@@ -530,6 +554,11 @@ public partial class MainWindow : Window
         System.Windows.Automation.AutomationProperties.SetName(AIUsageButton, Loc.T("AI 用量", "AI usage"));
         System.Windows.Automation.AutomationProperties.SetName(MonitorPageButton, Loc.T("系统监控", "System monitor"));
         System.Windows.Automation.AutomationProperties.SetName(MusicPageButton, Loc.T("音乐", "Music"));
+        // The pages added since; a button with no name reads as nothing to a screen reader and cannot be told apart
+        // in the accessibility tree.
+        System.Windows.Automation.AutomationProperties.SetName(KeysPageButton, Loc.T("额度环", "Allowance rings"));
+        System.Windows.Automation.AutomationProperties.SetName(CalendarPageButton, Loc.T("日程", "Calendar"));
+        System.Windows.Automation.AutomationProperties.SetName(MailPageButton, Loc.T("邮件", "Mail"));
         System.Windows.Automation.AutomationProperties.SetName(SettingsButton, Loc.T("设置", "Settings"));
     }
     public void Preview(bool enabled, bool expanded = true)
@@ -602,13 +631,20 @@ public partial class MainWindow : Window
 
     internal void ShowAlert(AppEntry entry, string label, double used, DateTimeOffset? resetAt)
         => ShowAlert(new CompactAlertInfo(entry, entry.Name, label + " ", used, resetAt));
+    // A message notice from one of the chat sources. It takes the same row as a quota notice, so the two never fight
+    // over it: whichever arrives last is shown, and each runs its own timer out.
+    internal void ShowMessage(ChatApp app, string sender, string text)
+        => ShowAlert(CompactAlertInfo.Message(app, sender, text));
     internal void ClearAlert() { _alertTimer.Stop(); _alert = null; RenderCompact(); }
     // No alert while the panel is suppressed (full-screen rule or hidden by the user): it would not be seen, and it must not
     // appear later when the panel shows again.
     private void ShowAlert(CompactAlertInfo alert)
     {
         if (IsSuppressed) return;
-        _alert = alert; _alertTimer.Stop(); _alertTimer.Start();
+        _alert = alert;
+        // A message notice lasts as long as the setting says, a quota notice the five seconds it always has.
+        _alertTimer.Interval = TimeSpan.FromSeconds(alert.Chat is null ? 5 : Settings.MessageAlertSeconds);
+        _alertTimer.Stop(); _alertTimer.Start();
         RenderCompact();
         if (!_expanded && !IsSuppressed) SetExpanded(false);
     }
@@ -960,6 +996,40 @@ public partial class MainWindow : Window
         await Task.WhenAll(prices, usage);
         return await usage;
     }
+    // Reads the chat clients alongside the usage read, on the same cycle, and shows the newest new message. It is a
+    // separate task from the usage read so a client that has hung cannot hold the quotas back: each source bounds its
+    // own read, and this one is not awaited by the refresh.
+    private void PollMessages()
+    {
+        if (_lead is not null) return;
+        var settings = Settings.Copy();
+        if (!_app.Messages.AnyEnabled(settings)) return;
+        _ = Task.Run(() =>
+        {
+            IReadOnlyList<IncomingMessage> fresh;
+            try { fresh = _app.Messages.Poll(settings); }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { return; }
+            if (fresh.Count == 0) return;
+            Dispatcher.BeginInvoke(() =>
+            {
+                // The settings may have turned the feature off while the read ran.
+                if (!Settings.MessageAlerts) return;
+                if (_app.Messages.Pick(fresh, DateTimeOffset.Now) is not { } message) return;
+                foreach (var deck in _app.Decks.ToList()) deck.ShowMessage(message.App, message.Sender, message.Summary);
+                RememberMessages();
+            });
+        });
+    }
+    // Persists what has been announced, so the next run does not repeat it. Written through the ordinary settings path,
+    // which debounces the write; only the newest keys are kept.
+    private void RememberMessages()
+    {
+        var newest = _app.Messages.Ledger.Newest(200).ToList();
+        if (Settings.MessageSeen.SequenceEqual(newest)) return;
+        var settings = Settings.Copy();
+        settings.MessageSeen = newest;
+        _app.UpdateSettings(settings);
+    }
     // Only the main panel reads; every panel shows the result. The history goes back as far as any panel's model details need.
     public async Task RefreshAsync(bool queueIfBusy = true)
     {
@@ -982,6 +1052,7 @@ public partial class MainWindow : Window
             _refreshing = false; foreach (var deck in _app.Decks) deck.FirstReadEnded();
             RestartSyncCycle(); _app.RequestTrim();
             foreach (var deck in _app.Decks) deck.RenderUsage();
+            PollMessages();
             if (_refreshRequested)
             {
                 _refreshRequested = false; _ = RefreshAsync();

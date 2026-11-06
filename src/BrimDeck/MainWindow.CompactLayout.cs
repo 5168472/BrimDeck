@@ -83,31 +83,39 @@ public partial class MainWindow
             && CompactAlert.Children.Count > 0 && CompactAlert.Children[0] is FrameworkElement { Tag: var tag } && ReferenceEquals(tag, AlertRegionTag)) return;
         CompactAlert.Children.Clear();
         _alertRendered = (shape, alert); _compactRendered = shape;
-        double scale = CompactMusicLayout.SafeScale(shape.Scale);
+        double natural = CompactMusicLayout.SafeScale(shape.Scale);
         double width = CompactContentWidth(shape);
         double dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
-        double font = Math.Max(1, CompactMusicLayout.Half(11.5 * scale)), line = Math.Max(1, CompactMusicLayout.Whole(16 * scale));
-        var name = UI.Fixed(alert.Name, font, line, UI.Primary, FontWeights.SemiBold); name.ToolTip = alert.Name;
+        double font = Math.Max(1, CompactMusicLayout.Half(11.5 * natural)), line = Math.Max(1, CompactMusicLayout.Whole(16 * natural));
+        // A message notice names the chat app, then says what arrived. A quota notice keeps its ring, name, share and
+        // reset time. The two share the row and the scrolling, so only what the row holds differs.
+        bool message = alert.Chat is not null;
+        var name = UI.Fixed(message ? alert.Name + " · " + alert.Label : alert.Name, font, line, UI.Primary, FontWeights.SemiBold);
+        name.ToolTip = message ? alert.Name + " · " + alert.Label : alert.Name;
         // The name keeps its 76 DIP cap with an ellipsis; below that, its region cuts it.
-        name.MaxWidth = CompactMusicLayout.Whole(76 * scale);
-        var used = UI.Fixed(Loc.T($"{alert.Label}已用 {alert.Used:0}%", $"{alert.Label}{alert.Used:0}% used"), font, line, UI.Secondary);
-        string shortReset = UI.ShortReset(alert.ResetAt);
+        name.MaxWidth = CompactMusicLayout.Whole((message ? 110 : 76) * natural);
+        var used = message ? null : UI.Fixed(Loc.T($"{alert.Label}已用 {alert.Used:0}%", $"{alert.Label}{alert.Used:0}% used"), font, line, UI.Secondary);
+        string shortReset = message ? "" : UI.ShortReset(alert.ResetAt);
         var reset = shortReset.Length > 0 ? UI.Fixed(Loc.T(shortReset + "重置", shortReset.StartsWith("in ", StringComparison.Ordinal) ? "resets " + shortReset : shortReset), font, line, UI.Tertiary) : null;
         double Natural(FrameworkElement element)
         {
             element.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             return Math.Ceiling(element.DesiredSize.Width * dpi - .001) / dpi;
         }
-        double nameWidth = Natural(name), usedWidth = Natural(used), resetWidth = reset is null ? 0 : Natural(reset);
-        var layout = CompactAlertLayout.Calculate(double.MaxValue, scale, nameWidth, usedWidth, resetWidth);
+        double nameWidth = Natural(name), usedWidth = used is null ? 0 : Natural(used), resetWidth = reset is null ? 0 : Natural(reset);
+        var layout = CompactAlertLayout.Calculate(double.MaxValue, natural, nameWidth, usedWidth, resetWidth);
+        // A message notice marks the app with a filled dot in its own colour where a quota notice draws its ring; the
+        // mark is the same diameter, so the row keeps the same height for either.
+        double markSize = layout.RingSize;
+        string markColor = message ? ChatColor(alert.Chat!.Value) : PanelTheme.QuotaTheme(alert.Entry!);
         if (ColumnFor(shape.Style))
         {
-            // A notch on a side edge: the ring, then each text on its own line, cut with an ellipsis to the column.
+            // A notch on a side edge: the mark, then each text on its own line, cut with an ellipsis to the column.
             double column = SnapDown(ColumnWidth(shape), dpi);
             var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Width = column, Tag = AlertRegionTag };
-            var mark = UI.Ring(alert.Used, PanelTheme.QuotaTheme(alert.Entry), layout.RingSize, layout.RingThickness);
-            mark.HorizontalAlignment = HorizontalAlignment.Center; mark.Margin = new Thickness(0, 0, 0, layout.Gap / 2);
-            stack.Children.Add(mark);
+            var columnMark = message || alert.Used <= 0 ? ChatMark(markColor, markSize) : UI.Ring(alert.Used, markColor, markSize, layout.RingThickness);
+            columnMark.HorizontalAlignment = HorizontalAlignment.Center; columnMark.Margin = new Thickness(0, 0, 0, layout.Gap / 2);
+            stack.Children.Add(columnMark);
             name.MaxWidth = column;
             foreach (var text in new[] { name, used, reset })
             {
@@ -120,11 +128,13 @@ public partial class MainWindow
             return;
         }
         double row = Math.Max(layout.RingSize, layout.LineHeight);
-        var ring = UI.Ring(alert.Used, PanelTheme.QuotaTheme(alert.Entry), layout.RingSize, layout.RingThickness);
+        FrameworkElement mark = message || alert.Used <= 0
+            ? ChatMark(markColor, markSize)
+            : UI.Ring(alert.Used, markColor, layout.RingSize, layout.RingThickness);
         var parts = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        if (layout.RingWidth > 0) parts.Children.Add(CompactRegion(ring, layout.RingWidth, layout.RingSize, layout.RingSize, row, RegionAnchor.Left, dpi));
+        if (layout.RingWidth > 0) parts.Children.Add(CompactRegion(mark, layout.RingWidth, layout.RingSize, layout.RingSize, row, RegionAnchor.Left, dpi));
         if (layout.NameWidth > 0) parts.Children.Add(CompactRegion(name, layout.NameWidth, Math.Min(nameWidth, name.MaxWidth), line, row, RegionAnchor.Left, dpi));
-        if (layout.TextWidth > 0) parts.Children.Add(CompactRegion(used, layout.TextWidth, usedWidth, line, row, RegionAnchor.Left, dpi));
+        if (used is not null && layout.TextWidth > 0) parts.Children.Add(CompactRegion(used, layout.TextWidth, usedWidth, line, row, RegionAnchor.Left, dpi));
         if (reset is not null && layout.ResetWidth > 0) parts.Children.Add(CompactRegion(reset, layout.ResetWidth, resetWidth, line, row, RegionAnchor.Left, dpi, layout.Gap));
         parts.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         double span = SnapDown(width, dpi), full = parts.DesiredSize.Width;
@@ -156,6 +166,22 @@ public partial class MainWindow
     }
 
     private enum RegionAnchor { Left, Center, Right }
+    // Each chat app keeps the colour its own brand uses, so the dot says which app it is without reading the name.
+    private static string ChatColor(ChatApp app) => app switch
+    {
+        ChatApp.Feishu => "#3370FF",
+        ChatApp.WeCom => "#2E7CF6",
+        _ => "#07C160"
+    };
+    // A filled disc where a quota notice draws its ring: the same footprint, so the row's height and the texts' places
+    // do not move when a message replaces a quota notice. The real logo would need image assets this project does not
+    // ship, and at this size a disc in the brand colour is what a phone's status bar shows anyway.
+    private static FrameworkElement ChatMark(string color, double size)
+    {
+        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+        brush.Freeze();
+        return new System.Windows.Shapes.Ellipse { Fill = brush, Width = size, Height = size, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+    }
     // Rounded down to whole device pixels, so regions never add up to more than the row.
     private static double SnapDown(double value, double dpi) => DevicePixels.Down(value, dpi);
     private static double Snap(double value, double dpi) => double.IsFinite(value) && dpi > 0 ? Math.Round(value * dpi, MidpointRounding.AwayFromZero) / dpi : 0;

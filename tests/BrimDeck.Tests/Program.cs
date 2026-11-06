@@ -72,6 +72,17 @@ try
     await PortableUpdateTests.Run(root, Check);
     SettingsMigrationTests.Run(root, Check);
     OffPeakTests.Run(root, Check);
+    ResetScheduleTests.Run(Check);
+    KeyProbeTests.Run(Check);
+    CalendarParserTests.Run(Check);
+    VerificationCodeTests.Run(Check);
+    AgendaServiceTests.Run(Check);
+    MailReadTests.Run(Check);
+    CalendarColumnTests.Run(Check);
+    PersistenceTests.Run(root, Check);
+    CalendarSourceTests.Run(Check);
+    CalDavDiscoveryTests.Run(Check);
+    ResetForecastTests.Run(Check);
     FullscreenRuleTests.Run(Check);
     LanguageTests.Run(root, Check);
     await ConfiguredProviderTests.Run(Check);

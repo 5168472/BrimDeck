@@ -7,7 +7,10 @@ namespace BrimDeck.Updates;
 
 internal static class GitHubUpdates
 {
-    public const string RepositoryUrl = "https://github.com/MoFeng2223/BrimDeck";
+    // This build's own repository, so an update it installs is a build of this fork and never a build of the project it
+    // was forked from. Pointing at the upstream repository offered the upstream release, which carries none of the changes
+    // made here and would replace them wholesale.
+    public const string RepositoryUrl = "https://github.com/5168472/BrimDeck";
     // Must match AppId in installer/BrimDeck.iss. Inno Setup registers the uninstall entry as "<AppId>_is1".
     public const string InstallerAppId = "{9D9AD6ED-CF62-4527-A587-6DBE94A74B9E}";
     public static string BuildVersion => ApplicationVersion.Current;

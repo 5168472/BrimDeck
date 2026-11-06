@@ -4,14 +4,22 @@ namespace BrimDeck.Core;
 // and which page the panel falls back to. The panel and the settings window ask here instead of comparing pages themselves.
 public static class DeckPages
 {
-    // The page switch, left to right, until the order is changed in the settings (DeckSettings.PageOrder).
-    public static readonly IReadOnlyList<DeckPage> Order = [DeckPage.Usage, DeckPage.Music, DeckPage.Monitor];
+    // The page switch, left to right, until the order is changed in the settings (DeckSettings.PageOrder). The keys page
+    // sits right after the quotas: it answers the same question for the allowances the panel cannot read itself.
+    public static readonly IReadOnlyList<DeckPage> Order = [DeckPage.Usage, DeckPage.Keys, DeckPage.Music, DeckPage.Monitor, DeckPage.Calendar, DeckPage.Mail];
     // Each known page once, in the saved order; a page missing from the file takes its default place after the others.
     public static List<DeckPage> Normalize(IEnumerable<DeckPage>? order) => [.. (order ?? []).Where(page => Enum.IsDefined(page)).Concat(Order).Distinct()];
 
     public static bool Shown(DeckSettings settings, DeckPage page) => page switch
     {
-        DeckPage.Usage => settings.UsagePage, DeckPage.Music => settings.MusicPage, DeckPage.Monitor => settings.MonitorPage, _ => false
+        DeckPage.Usage => settings.UsagePage, DeckPage.Music => settings.MusicPage, DeckPage.Monitor => settings.MonitorPage,
+        // The keys page is worth showing exactly when there is a key to show; with none it would be a page about nothing.
+        DeckPage.Keys => settings.KeysPage && settings.KeyResets.Any(key => key.Enabled),
+        // The calendar and the mail pages say how to set themselves up when there is no account yet, so their
+        // switch alone decides whether they appear: a page that is hidden until it is configured cannot be found
+        // by the person who needs to configure it.
+        DeckPage.Calendar => settings.CalendarPage,
+        DeckPage.Mail => settings.MailPage,        _ => false
     };
 
     public static IReadOnlyList<DeckPage> Visible(DeckSettings settings) => settings.PageOrder.Where(page => Shown(settings, page)).ToList();
@@ -24,7 +32,9 @@ public static class DeckPages
     // The page the panel opens on; null keeps the last viewed page.
     public static DeckPage? Opening(DefaultDeckPage choice) => choice switch
     {
-        DefaultDeckPage.Usage => DeckPage.Usage, DefaultDeckPage.Music => DeckPage.Music, DefaultDeckPage.Monitor => DeckPage.Monitor, _ => null
+        DefaultDeckPage.Usage => DeckPage.Usage, DefaultDeckPage.Music => DeckPage.Music, DefaultDeckPage.Monitor => DeckPage.Monitor,
+        DefaultDeckPage.Keys => DeckPage.Keys,
+        DefaultDeckPage.Calendar => DeckPage.Calendar, DefaultDeckPage.Mail => DeckPage.Mail, _ => null
     };
 
     // Every page's size lies within these; the usage page is also at least as wide as its columns need (MinimumWidth).
@@ -45,6 +55,9 @@ public static class DeckPages
         {
             case DeckPage.Music: settings.MusicWidth = width; settings.MusicHeight = height; break;
             case DeckPage.Monitor: settings.MonitorWidth = width; settings.MonitorHeight = height; break;
+            case DeckPage.Keys: settings.KeysWidth = width; settings.KeysHeight = height; break;
+            case DeckPage.Calendar: settings.CalendarWidth = width; settings.CalendarHeight = height; break;
+            case DeckPage.Mail: settings.MailWidth = width; settings.MailHeight = height; break;
             default: settings.Width = width; settings.Height = height; break;
         }
     }
@@ -53,6 +66,12 @@ public static class DeckPages
     {
         DeckPage.Music => (settings.MusicWidth, settings.MusicHeight),
         DeckPage.Monitor => (settings.MonitorWidth, settings.MonitorHeight),
+        // A file saved before this page existed has no size for it, which reads back as 0. A zero would size the panel to
+        // nothing, so the page's default stands in until the file is written again. The same guard the other pages get by
+        // having had their defaults in the file for as long as the file has existed.
+        DeckPage.Keys => (settings.KeysWidth > 0 ? settings.KeysWidth : 560, settings.KeysHeight > 0 ? settings.KeysHeight : 200),
+        DeckPage.Calendar => (settings.CalendarWidth > 0 ? settings.CalendarWidth : 520, settings.CalendarHeight > 0 ? settings.CalendarHeight : 280),
+        DeckPage.Mail => (settings.MailWidth > 0 ? settings.MailWidth : 520, settings.MailHeight > 0 ? settings.MailHeight : 280),
         _ => (Math.Max(settings.Width, settings.MinimumWidth), settings.Height)
     };
 

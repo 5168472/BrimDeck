@@ -81,9 +81,14 @@ public partial class MainWindow
     }
 
     // Which form the grips take now: the open monitor page, the collapsed surface, or none (another page, a preview, hidden,
-    // a quota alert widening the surface, powering off).
-    private bool PanelResizable => _expanded && !_preview && IsVisible && !IsSuppressed && !_poweringOff;
-    private bool CompactResizable => !_expanded && !_preview && IsVisible && !IsSuppressed && _alert is null && !_poweringOff;
+    // a quota alert widening the surface, powering off, or the size locked). A locked size draws no grips at all, which
+    // is what tells the pointer there is nothing to drag here.
+    private bool PanelResizable => _expanded && !_preview && IsVisible && !IsSuppressed && !_poweringOff && !SizeLocked;
+    private bool CompactResizable => !_expanded && !_preview && IsVisible && !IsSuppressed && _alert is null && !_poweringOff && !SizeLocked;
+
+    // The lock, read straight from the settings so a change takes effect on the next frame without a redraw being asked
+    // for.
+    private bool SizeLocked => Settings.SizeLocked;
 
     // The island's box in the window's coordinates, where the grip layer draws.
     private DipRect IslandBox()
@@ -212,6 +217,9 @@ public partial class MainWindow
     // size it shows, which a smaller monitor may hold below the saved one. Returns whether it picked up a settling resize.
     private bool BeginResize(bool compact)
     {
+        // A locked size refuses a drag here as well as at the grips: the grips are not drawn when it is locked, but this
+        // is the one place a drag actually starts, and a lock that only hides its handles is not a lock.
+        if (SizeLocked) return false;
         bool settling = SettlingHere(compact);
         if (_resizeSettling && !settling) { StopSpring(); FinishResize(); }
         if (!compact) { _monitorView?.CloseCard(); _detailPopup?.Close(); }

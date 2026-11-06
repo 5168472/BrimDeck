@@ -12,6 +12,7 @@ public partial class MainWindow
     private void PlacePageCapsule()
     {
         var button = PageButton(CurrentPage);
+        if (button is null) return;
         if (!LayoutRetry.Laid(button))
         {
             // Retried after a layout pass, never by posting itself again: the switch is collapsed while the usage details show, its
@@ -33,16 +34,19 @@ public partial class MainWindow
     private bool _capsulePending;
     // The page buttons take the header's button height, and the capsule under the chosen one takes it in the same step: PlacePageCapsule,
     // which RefreshStatus runs before ApplyHeader, would otherwise leave it at the size tier left behind until the next refresh.
-    private void FitPageButtons(PanelHeader header)
-    {
-        foreach (var button in new[] { AIUsageButton, MonitorPageButton, MusicPageButton }) button.Height = header.ButtonHeight;
-        PageCapsule.Height = header.ButtonHeight;
-    }
+private void FitPageButtons(PanelHeader header)
+{
+    foreach (var button in new[] { AIUsageButton, MonitorPageButton, MusicPageButton, KeysPageButton, CalendarPageButton, MailPageButton }) button.Height = header.ButtonHeight;
+    PageCapsule.Height = header.ButtonHeight;
+}
     // The buttons stand in the order chosen in the settings; the first has no gap before it.
     private void OrderPageButtons()
     {
         if (AIUsageButton.Parent is not Panel buttons) return;
-        var order = Settings.PageOrder.Select(PageButton).ToList();
+        // Only the pages that are shown get a button. The keys page needs a key to show, so adding the first key or
+        // removing the last one changes the switch itself, which is why this reads the shown list rather than the saved order.
+        var shown = DeckPages.Visible(Settings).ToHashSet();
+        var order = Settings.PageOrder.Where(shown.Contains).Select(PageButton).ToList();
         if (!buttons.Children.Cast<UIElement>().SequenceEqual(order))
         {
             buttons.Children.Clear();
@@ -50,5 +54,9 @@ public partial class MainWindow
         }
         for (int i = 0; i < order.Count; i++) order[i].Margin = new Thickness(i == 0 ? 0 : 1, 0, 0, 0);
     }
-    private Button PageButton(DeckPage page) => page switch { DeckPage.Music => MusicPageButton, DeckPage.Monitor => MonitorPageButton, _ => AIUsageButton };
+    private Button PageButton(DeckPage page) => page switch
+    {
+        DeckPage.Music => MusicPageButton, DeckPage.Monitor => MonitorPageButton, DeckPage.Keys => KeysPageButton,
+        DeckPage.Calendar => CalendarPageButton, DeckPage.Mail => MailPageButton, _ => AIUsageButton
+    };
 }

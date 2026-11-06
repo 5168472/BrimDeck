@@ -40,8 +40,9 @@ public sealed record FullscreenRule(string Name = "", string Path = "")
 public enum ProviderId { Claude, Codex, Antigravity, Cursor, GlmChina, NewApi, Sub2Api, Custom, ZCode = 10, GlmGlobal = 11, Dsh = 12, DeepSeek = 13, GrokBot = 14, Kimi = 15, KimiApi = 16, OpenCode = 17, OpenCodeGo = 18, OpenRouter = 19, Pi = 20 }
 public enum SettingsTheme { System, Light, Dark }
 // Pages are saved as numbers, so new members go at the end; their order in the page switch is DeckSettings.PageOrder.
-public enum DeckPage { Usage, Music, Monitor }
-public enum DefaultDeckPage { Last, Usage, Music, Monitor }
+// Saved as numbers, so new members go at the end: the keys page was added after the three original pages.
+public enum DeckPage { Usage, Music, Monitor, Keys, Calendar, Mail }
+public enum DefaultDeckPage { Last, Usage, Music, Monitor, Keys, Calendar, Mail }
 // What the mouse wheel does over the expanded panel. Saved as numbers, so new members go at the end.
 public enum MouseWheelAction { None, Pages, Volume }
 // What a double click on an end of the collapsed notch or capsule does: turn its auto width on or off, or start moving it
@@ -179,6 +180,139 @@ public sealed class AppEntry
     }
 }
 
+// One AI key whose resets the user tracks. Two things decide the reset times, in this order:
+//
+//  1. What the service itself said on the last probe (ProbedResetAt). This is the real reset, and nothing beats it.
+//  2. The schedule, worked out from the anchor and the interval, which the panel learns from the probes it has seen:
+//     each time a probe reports a later reset, the gap from the previous one is what the interval becomes. Until two
+//     probes have been seen it uses the interval the user gave.
+//
+// So the panel maintains the times itself: hourly probes refine them, and between probes the schedule keeps counting
+// down, so the countdown is never blank and never jumps backwards.
+public sealed class KeyReset
+{
+    public Guid InstanceId { get; set; } = Guid.NewGuid();
+    // What the row is called, e.g. "Claude Pro" or "Gemini 高级版". Empty means "AI key".
+    public string Name { get; set; } = "";
+    // Which API to probe, and where. The key itself never lives here: it is kept in secrets.dat under InstanceId.
+    public KeyProbeKind Probe { get; set; } = KeyProbeKind.Anthropic;
+    // The endpoint a probe is sent to. Empty uses the default for the kind. An OpenAI-compatible gateway (MiniMax and
+    // the like) needs its own address here, since there is no way to know it.
+    public string Endpoint { get; set; } = "";
+    // The model an OpenAI-compatible request names. These services refuse a model they no longer serve and retire names
+    // often, so it is a setting; empty falls back to a current default.
+    public string Model { get; set; } = "";
+    public bool ProbeEnabled { get; set; } = true;
+    // The first reset the user knows the time of. Every reset is this instant plus a whole number of intervals.
+    public DateTimeOffset Anchor { get; set; } = DateTimeOffset.Now;
+    // The gap between resets, in minutes. 7 days is 10080; a per-hour key is 60. A probe that reports a later reset
+    // than the one it replaces sets this from the gap it measured (LearnFrom), so the value becomes the service's own.
+    public int IntervalMinutes { get; set; } = 7 * 24 * 60;
+    // How far ahead the list of resets runs, and how often that look-ahead moves on. The panel's default is a
+    // week ahead, moved on the fifth day, so two days of resets overlap between windows.
+    public int HorizonDays { get; set; } = 7;
+    public int RefreshDays { get; set; } = 5;
+    // Shown on the usage page as a countdown in this colour. Empty takes the panel theme's accent.
+    public string Color { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+    // What the last successful probe reported, and when it ran. ResetAt is the service's own answer and is used in
+    // place of the schedule while it is in the future; the note is what the settings page shows beside the row.
+    public DateTimeOffset? ProbedResetAt { get; set; }
+    public DateTimeOffset? ProbedAt { get; set; }
+    public string ProbedWindow { get; set; } = "";
+    public string ProbeNote { get; set; } = "";
+    // The reset the probe reported before ProbedResetAt, which is how the interval is measured: one reset to the next.
+    public DateTimeOffset? PreviousResetAt { get; set; }
+    public KeyReset Copy() => (KeyReset)MemberwiseClone();
+    public KeyReset Normalized() => new()
+    {
+        InstanceId = InstanceId == Guid.Empty ? Guid.NewGuid() : InstanceId,
+        Name = Regex.Replace(Name ?? "", @"\s+", " ").Trim() is { Length: > 0 } name ? name[..Math.Min(name.Length, 64)] : "",
+        Probe = Enum.IsDefined(Probe) ? Probe : KeyProbeKind.Anthropic,
+        Endpoint = (Endpoint ?? "").Trim() is { Length: > 0 } endpoint ? endpoint[..Math.Min(endpoint.Length, 300)] : "",
+        Model = (Model ?? "").Trim() is { Length: > 0 } model ? model[..Math.Min(model.Length, 120)] : "",
+        ProbeEnabled = ProbeEnabled,
+        Anchor = OnHour(Anchor),
+        IntervalMinutes = Math.Clamp(IntervalMinutes, 1, 527040),
+        HorizonDays = Math.Clamp(HorizonDays, 2, 60),
+        RefreshDays = Math.Clamp(RefreshDays, 1, Math.Max(1, Math.Clamp(HorizonDays, 2, 60) - 1)),
+        Color = AppPresets.NormalizeColor(Color),
+        Enabled = Enabled,
+        ProbedResetAt = ProbedResetAt,
+        ProbedAt = ProbedAt,
+        ProbedWindow = ProbedWindow ?? "",
+        ProbeNote = ProbeNote ?? "",
+        PreviousResetAt = PreviousResetAt
+    };
+    [JsonIgnore] public string DisplayName => Name.Length > 0 ? Name : Loc.T("AI key", "AI key");
+    // What a probe is sent to. The defaults are the services' own usage endpoints, which state the reset in their headers.
+    [JsonIgnore] public string ProbeUrl => Endpoint.Length > 0 ? Endpoint : Probe switch
+    {
+        KeyProbeKind.Anthropic => "https://api.anthropic.com/v1/messages",
+        _ => "https://api.openai.com/v1/models"
+    };
+    [JsonIgnore] public ResetSchedule Schedule => new ResetSchedule(Anchor, TimeSpan.FromMinutes(IntervalMinutes), HorizonDays, RefreshDays).Normalize();
+    // The reset the panel counts down to: the service's own statement while it is still ahead, otherwise what the
+    // schedule works out. A probed instant that has passed is dropped rather than shown as a reset in the past.
+    public DateTimeOffset? NextReset(DateTimeOffset now)
+    {
+        // A reported instant is used as the service stated it, hour or not: a service that said 16:43 meant 16:43.
+        if (ProbedResetAt is { } probed && probed > now) return probed;
+        return Schedule.Next(now);
+    }
+    // The anchor on the hour it was given in. A schedule is only as tidy as the moment it starts from, and a key added
+    // at 11:18 would otherwise come back at every :18 past the hour. Rounding the anchor rather than each result keeps
+    // the interval exact: five hours from 11:00 is 16:00, and from 11:18 it is 16:18, which no allowance does.
+    private static DateTimeOffset OnHour(DateTimeOffset at) =>
+        at.Minute == 0 && at.Second == 0 && at.Millisecond == 0
+            ? at
+            : new DateTimeOffset(at.Year, at.Month, at.Day, at.Hour, 0, 0, at.Offset);
+    // Takes a probe's answer. A later reset than the one already known moves the anchor to it and sets the interval to
+    // the gap between the two, which is the service's real period; the schedule then runs from there, so the countdown
+    // between probes follows the same period the service uses.
+    public KeyReset WithProbe(KeyProbeResult result, DateTimeOffset now)
+    {
+        var next = Copy();
+        next.ProbedAt = now;
+        next.ProbeNote = result.Note ?? "";
+        if (!result.Ok)
+        {
+            // A failed probe changes nothing about the times: the schedule keeps counting down from what is known.
+            return next;
+        }
+        if (result.ResetAt is not { } reset) return next;
+        // The same reset seen again is the same reset; only a later one is news, and only the gap to it is measurable.
+        if (ProbedResetAt is { } known && reset <= known)
+        {
+            next.ProbedResetAt = known;
+            return next;
+        }
+        if (ProbedResetAt is { } previous && reset > previous && reset - previous >= TimeSpan.FromMinutes(1))
+        {
+            next.PreviousResetAt = previous;
+            next.IntervalMinutes = (int)Math.Clamp(Math.Round((reset - previous).TotalMinutes), 1, 527040);
+        }
+        next.ProbedResetAt = reset;
+        next.ProbedWindow = result.Window ?? "";
+        // The schedule starts from the newest known reset, so the times between probes come from the same period.
+        next.Anchor = reset;
+        return next;
+    }
+    // The interval written the way a person reads it: "7 天", "12 小时", "90 分钟".
+    [JsonIgnore] public string IntervalText
+    {
+        get
+        {
+            var span = TimeSpan.FromMinutes(Math.Clamp(IntervalMinutes, 1, 527040));
+            if (span.TotalDays >= 1 && span.TotalDays == Math.Floor(span.TotalDays))
+                return Loc.T($"{(int)span.TotalDays} 天", $"{(int)span.TotalDays} d");
+            if (span.TotalHours >= 1 && span.TotalMinutes % 60 == 0)
+                return Loc.T($"{(int)span.TotalHours} 小时", $"{(int)span.TotalHours} h");
+            return Loc.T($"{IntervalMinutes} 分钟", $"{IntervalMinutes} min");
+        }
+    }
+}
+
 // One daily off-peak period: Start and End are minutes after local midnight. An End before Start runs past midnight
 // into the next day; an End equal to Start covers the whole day, as the settings bar dragged out to both edges gives.
 public sealed class OffPeakPeriod
@@ -214,6 +348,8 @@ public static class AppPresets
     public const int MaximumFullscreenExceptions = 32;
     public const string WarningColor = "#E5C890", CriticalColor = "#E78284";
     public const int MaximumOffPeakPeriods = 6;
+    // Reset schedules listed on the usage page. Eight rows fit the page without a scroll of their own.
+    public const int MaximumKeys = 8;
     public const decimal MaximumBalanceTarget = 1_000_000_000;
     public const double WarningPercent = 70, CriticalPercent = 90;
     // Each column needs this much width; the panel's minimum width follows the number of enabled applications.
@@ -345,6 +481,21 @@ public sealed class DeckSettings
     public bool MusicPage { get; set; } = true;
     public double MusicWidth { get; set; } = 440;
     public double MusicHeight { get; set; } = 200;
+    // The API key reset page: a card per key, so it is wider than the music page by default and lower than the quotas page.
+    public double KeysWidth { get; set; } = 560;
+    public double KeysHeight { get; set; } = 200;
+    // Whether the keys page appears in the page switch at all. It also needs a key to show, so an empty list hides it.
+    public bool KeysPage { get; set; } = true;
+    // The work calendar page and the mail page, with their own sizes: a list of meetings and a list of mail are
+    // taller than they are wide.
+    public double CalendarWidth { get; set; } = 520;
+    public double CalendarHeight { get; set; } = 280;
+    public double MailWidth { get; set; } = 520;
+    public double MailHeight { get; set; } = 280;
+    public bool CalendarPage { get; set; } = true;
+    public bool MailPage { get; set; } = true;
+    // How long before a meeting the panel mentions it, in minutes.
+    public int ReminderLead { get; set; } = 15;
     // The notch and the capsule each keep their own choices; the indicator only offers the playback progress.
     public bool NotchSummary { get; set; } = true;
     public bool NotchMusic { get; set; } = true;
@@ -423,6 +574,10 @@ public sealed class DeckSettings
     // grow together, as Windows' display scaling would for BrimDeck alone. Sizes stay saved before the scale.
     public int PanelScale { get; set; } = PanelScales.Default;
     public int OpenDelay { get; set; } = 0;
+    // Whether the size can be changed by dragging its edges. Locked, the grips are not drawn and a drag does nothing,
+    // so a panel that has been sized and placed cannot be changed by a stray pointer on the screen's edge. The size
+    // settings still work; what is locked is the drag.
+    public bool SizeLocked { get; set; }
     public int CloseDelay { get; set; } = 0;
     public int AnimationDuration { get; set; } = 360;
     public bool Animations { get; set; } = true;
@@ -514,6 +669,21 @@ public sealed class DeckSettings
     public bool SettingsWindowMaximized { get; set; }
     // Shows the compact notice when a quota rises into the warning or critical level.
     public bool QuotaAlerts { get; set; } = true;
+    // Shows an incoming chat message from Feishu, WeCom or WeChat in the compact island, the way a phone shows one.
+    public bool MessageAlerts { get; set; }
+    // How long a message notice stays, in seconds, and whether the three apps are each read.
+    public int MessageAlertSeconds { get; set; } = 6;
+    public bool MessageFeishu { get; set; } = true;
+    public bool MessageWeCom { get; set; } = true;
+    public bool MessageWeChat { get; set; } = true;
+    // The fingerprints of messages already announced, newest last, so a restart does not replay what is still on screen.
+    // Bounded by MessageLedger's capacity; kept out of the settings page because it is bookkeeping, not a choice.
+    public List<string> MessageSeen { get; set; } = [];
+    // The reset schedules of AI keys the user tracks, in the column order of the usage page. Kept even when empty.
+    public List<KeyReset> KeyResets { get; set; } = [];
+    // The work calendars, the mailboxes and what has already been announced. The passwords are not here: they live
+    // in the secrets store under each account's own id.
+    public CalendarState Agenda { get; set; } = new();
     // Also reads the Claude Code and Codex CLI session records inside WSL distributions. Off by default: it starts stopped distributions.
     public bool IncludeWsl { get; set; }
     // The ordered application list; the order is the column order of the expanded panel. Claude and Codex are shown
@@ -524,6 +694,15 @@ public sealed class DeckSettings
         set => _apps = value;
     }
 
+    // Replaces one key row in place, leaving every other row as it is. A probe that finished while the user was editing
+    // the list must not overwrite the edit, so it says which row it learned about rather than handing over a whole list.
+    public bool UpdateKey(Guid instanceId, Func<KeyReset, KeyReset> change)
+    {
+        var index = KeyResets.FindIndex(key => key.InstanceId == instanceId);
+        if (index < 0) return false;
+        KeyResets[index] = change(KeyResets[index]);
+        return true;
+    }
     public bool ShowsSummary(CompactStyle style) => style switch { CompactStyle.Notch => NotchSummary, CompactStyle.Capsule => CapsuleSummary, _ => false };
     public bool ShowsMusic(CompactStyle style) => style switch { CompactStyle.Notch => NotchMusic, CompactStyle.Capsule => CapsuleMusic, _ => false };
     // The indicator shows neither the equalizer nor the clock.
@@ -552,6 +731,17 @@ public sealed class DeckSettings
     [JsonIgnore] public IReadOnlyList<AppEntry> EnabledApps => QuotaWanted ? ConfiguredApps : [];
     [JsonIgnore] public IReadOnlySet<ProviderId> RequiredProviders => EnabledApps.SelectMany(app => new[] { app.QuotaSource, app.UsageSource }).ToHashSet();
     [JsonIgnore] public IReadOnlyList<ProviderId> StatisticsProviders => EnabledApps.Select(app => app.UsageSource).Distinct().ToList();
+    // Whether a key row had to be put on the hour when it was read. The store saves what it loaded when the file holds
+    // an anchor off the hour, so the rounding is written once rather than worked out again on every start.
+    [JsonIgnore] public bool KeyResetsMovedToHour
+    {
+        get
+        {
+            foreach (var key in KeyResets)
+                if (key.Anchor.Minute != 0 || key.Anchor.Second != 0 || key.Anchor.Millisecond != 0) return true;
+            return false;
+        }
+    }
     [JsonIgnore] public double MinimumWidth => Math.Clamp(Math.Max(440, AppPresets.MinimumColumnWidth * Math.Max(1, ConfiguredApps.Count) + 40), 440, 1200);
     public (double Width, double Height) PresetSize(PanelSize size)
     {
@@ -607,6 +797,8 @@ public sealed class DeckSettings
         copy.DisplayMonitors = [.. DisplayMonitors ?? []];
         copy.ThemeChoices = (ThemeChoices ?? []).ToDictionary(pair => pair.Key, pair => pair.Value.Copy());
         copy.FullscreenRules = FullscreenRules.Select(rule => rule with { }).ToList();
+        copy.KeyResets = (KeyResets ?? []).Select(key => key.Copy()).ToList();
+        copy.Agenda = (Agenda ?? new()).Copy();
         return copy;
     }
     public void Normalize()
@@ -629,6 +821,45 @@ public sealed class DeckSettings
             }
             app.Normalize();
         }
+        // The calendars, the mailboxes and what they have announced. A file written before any of them existed has no
+        // Agenda at all, and reading it as null would make the first look at it fail; it is created empty instead, so
+        // an older file opens on a panel with no calendar rather than not opening.
+        Agenda ??= new();
+        Agenda.Accounts = (Agenda.Accounts ?? []).Where(account => account is not null).ToList();
+        foreach (var account in Agenda.Accounts)
+        {
+            if (account.InstanceId == Guid.Empty || !seen.Add(account.InstanceId)) account.InstanceId = Guid.NewGuid();
+            account.User = (account.User ?? "").Trim();
+            account.Href = account.Href ?? "";
+        }
+        Agenda.Subscriptions = (Agenda.Subscriptions ?? []).Where(subscription => subscription is not null).ToList();
+        // The number of entries the calendar page's column holds. Clamped here so a hand-edited file cannot ask for a
+        // column of nothing or of a thousand rows.
+        Agenda.ListRows = Math.Clamp(Agenda.ListRows, 1, 12);
+        foreach (var subscription in Agenda.Subscriptions)
+        {
+            if (subscription.InstanceId == Guid.Empty || !seen.Add(subscription.InstanceId)) subscription.InstanceId = Guid.NewGuid();
+            subscription.Name = (subscription.Name ?? "").Trim();
+            subscription.Url = (subscription.Url ?? "").Trim();
+        }
+        // A mailbox is kept even while its address is empty: adding one puts an empty row on the page for the user to fill
+        // in, and dropping it here removed the row in the same breath it appeared, so "Add a mailbox" looked like it did
+        // nothing at all. A row the user never fills in is theirs to remove, not this method's to discard.
+        Agenda.MailAccounts = (Agenda.MailAccounts ?? []).Where(account => account is not null).ToList();
+        foreach (var account in Agenda.MailAccounts)
+        {
+            if (account.InstanceId == Guid.Empty || !seen.Add(account.InstanceId)) account.InstanceId = Guid.NewGuid();
+            account.Email = (account.Email ?? "").Trim();
+            account.Host = account.Host ?? "";
+            account.User = account.User ?? "";
+            if (!Enum.IsDefined(account.Provider)) account.Provider = MailReader.Provider.Qq;
+        }
+        Agenda.LocalEvents = (Agenda.LocalEvents ?? []).Where(entry => entry is not null).ToList();
+        Agenda.IgnoredMailEvents = (Agenda.IgnoredMailEvents ?? []).Where(key => !string.IsNullOrEmpty(key)).ToList();
+        Agenda.Announced = (Agenda.Announced ?? []).Where(key => !string.IsNullOrEmpty(key)).TakeLast(500).ToList();
+        // A mailbox's read mark is only useful while the mailbox is there; a stale entry would grow the file for ever.
+        var mailboxes = Agenda.MailAccounts.Select(account => account.InstanceId).ToHashSet();
+        Agenda.SeenMailUids = (Agenda.SeenMailUids ?? []).Where(pair => mailboxes.Contains(pair.Key)).ToDictionary(pair => pair.Key, pair => pair.Value ?? []);
         Width = double.IsFinite(Width) ? Math.Clamp(Width, DeckPages.MinWidth, DeckPages.MaxWidth) : 760;
         Width = Math.Max(Width, MinimumWidth);
         Height = double.IsFinite(Height) ? Math.Clamp(Height, DeckPages.MinHeight, DeckPages.MaxHeight) : 240;
@@ -636,6 +867,13 @@ public sealed class DeckSettings
         MusicHeight = double.IsFinite(MusicHeight) ? Math.Clamp(MusicHeight, DeckPages.MinHeight, DeckPages.MaxHeight) : 200;
         MonitorWidth = double.IsFinite(MonitorWidth) ? Math.Clamp(MonitorWidth, DeckPages.MinWidth, DeckPages.MaxWidth) : MonitorSizes.Default.Width;
         MonitorHeight = double.IsFinite(MonitorHeight) ? Math.Clamp(MonitorHeight, DeckPages.MinHeight, DeckPages.MaxHeight) : MonitorSizes.Default.Height;
+        KeysWidth = double.IsFinite(KeysWidth) ? Math.Clamp(KeysWidth, DeckPages.MinWidth, DeckPages.MaxWidth) : 560;
+        KeysHeight = double.IsFinite(KeysHeight) ? Math.Clamp(KeysHeight, DeckPages.MinHeight, DeckPages.MaxHeight) : 200;
+        CalendarWidth = double.IsFinite(CalendarWidth) ? Math.Clamp(CalendarWidth, DeckPages.MinWidth, DeckPages.MaxWidth) : 520;
+        CalendarHeight = double.IsFinite(CalendarHeight) ? Math.Clamp(CalendarHeight, DeckPages.MinHeight, DeckPages.MaxHeight) : 280;
+        MailWidth = double.IsFinite(MailWidth) ? Math.Clamp(MailWidth, DeckPages.MinWidth, DeckPages.MaxWidth) : 520;
+        MailHeight = double.IsFinite(MailHeight) ? Math.Clamp(MailHeight, DeckPages.MinHeight, DeckPages.MaxHeight) : 280;
+        ReminderLead = Math.Clamp(ReminderLead, 0, 1440);
         PanelScale = PanelScales.Fit(PanelScale);
         if (!Enum.IsDefined(MonitorPalette)) MonitorPalette = MonitorPalette.Theme;
         MonitorCustomColors ??= new();
@@ -654,6 +892,20 @@ public sealed class DeckSettings
         if (CompactMonitorItems == CompactMonitorItems.None) CompactMonitorItems = CompactMonitorItems.Cpu;
         CompactReadings = Core.CompactMonitor.Normalize(CompactReadings);
         Core.CompactMonitor.MoveColors(this);
+        MessageAlertSeconds = Math.Clamp(MessageAlertSeconds, 2, 30);
+        MessageSeen = [.. (MessageSeen ?? []).Where(key => !string.IsNullOrEmpty(key)).TakeLast(500)];
+        // A key row without a name or with an interval out of range is repaired rather than dropped: the user
+        // typed something there, and losing it on the next save would be worse than a rounded value.
+        var keyIds = new HashSet<Guid>();
+        KeyResets = (KeyResets ?? []).Where(key => key is not null).Take(AppPresets.MaximumKeys).Select(key =>
+        {
+            var fixedKey = key.Normalized();
+            if (!keyIds.Add(fixedKey.InstanceId))
+            {
+                do { fixedKey.InstanceId = Guid.NewGuid(); } while (!keyIds.Add(fixedKey.InstanceId));
+            }
+            return fixedKey;
+        }).ToList();
         CompactMonitor = Core.CompactMonitor.Preset(CompactReadings) ?? CompactMonitorMode.Custom;
         CompactMonitorItems = Core.CompactMonitor.Shown(CompactReadings);
         if (!Enum.IsDefined(MusicText)) MusicText = CompactMusicText.None;

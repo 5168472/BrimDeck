@@ -22,6 +22,13 @@ public partial class App : Application
     public UsageService Usage { get; private set; } = null!;
     public ProviderSecrets Secrets { get; private set; } = null!;
     public Pricing Prices { get; private set; } = null!;
+    // Reads the chat clients once the user turns message notices on. Built with the other services so the settings page
+    // can ask a source whether it can run here even before the feature is on.
+    public MessageWatcher Messages { get; private set; } = null!;
+    // Probes the AI keys the user configured, hourly, and keeps each one's reset time current.
+    public KeyProber Prober { get; private set; } = null!;
+    // Reads the work calendars and the mailboxes.
+    public AgendaService Agenda { get; private set; } = null!;
     public AppUpdates Updates { get; internal set; } = null!;
     // The main panel. It owns the tray icon, reads the usage data and takes the settings preview; every other chosen
     // monitor gets a panel that shows the same data.
@@ -106,6 +113,14 @@ public partial class App : Application
         Lyrics = new LyricsService(appleLyricsFile: Path.Combine(folder, "apple-music-lyrics.json"));
         Usage = new UsageService(new DesktopSources(), secrets: Secrets, quotaCache: Path.Combine(folder, ClaudeQuotaCache.FileName),
             kimiQuotaCache: Path.Combine(folder, KimiQuotaCache.FileName));
+        // The ledger starts from what the last run announced, so a message still on screen is not announced twice.
+        var ledger = new MessageLedger();
+        ledger.Seed(Settings.MessageSeen ?? []);
+        Messages = new MessageWatcher(
+            [new Native.UnreadCountSource(ChatApp.Feishu), new Native.UnreadCountSource(ChatApp.WeCom), new Native.UnreadCountSource(ChatApp.WeChat)],
+            ledger);
+        Prober = new KeyProber(KeyProbeHttp(), Secrets);
+        Agenda = new AgendaService(new CalDavClient(AgendaHttp()), new EwsCalendarClient(AgendaHttp()), new MailReader(Secrets), Secrets);
         WindowDrags = new WindowDrags();
         Deck = new MainWindow(this); MainWindow = Deck;
         Displays = Native.Displays.Current(); AssignDisplays();
@@ -116,6 +131,15 @@ public partial class App : Application
         if (Settings.MonitorPage && Settings.MonitorPower) PowerWarm.Start(Dispatcher);
         WarmSettingsWriter();
         DisplayPower.Install(Dispatcher);
+        Trace("startup: reached the scheduling step");
+        // A key read from an older file may carry an anchor off the hour, which Normalize puts on the hour in memory. The
+        // file is written at once with the rounded value, so the countdown is on the hour from the first start and the
+        // rounding is not repeated on every load. Written now rather than queued: a queued write is a timer away, and a
+        // start that opened and closed the panel in between left the file as it was.
+        if (Settings.KeyResetsMovedToHour) { FlushSettings(); Trace("startup: key anchors moved to the hour"); }
+        ScheduleProbes();
+        ScheduleAgenda();
+        Trace("startup: agenda scheduled");
         _save.Tick += (_, _) => FlushSettings();
         ApplyTray();
         _settingsEvent = new EventWaitHandle(false, EventResetMode.AutoReset, eventName);
@@ -217,8 +241,11 @@ public partial class App : Application
         if (languageChanged) UseLanguage();
         PanelTheme.Use(settings);
         ScheduleDaylight();
-        AssignDisplays();
-        foreach (var deck in Decks.ToList()) { if (styleChanged) deck.MorphShape(); else deck.ApplySettings(); }
+        // A key added, removed or turned off changes when the next probe is due.
+        ScheduleProbes();
+        // The same for the calendars and the mailboxes.
+        ScheduleAgenda();
+        AssignDisplays();        foreach (var deck in Decks.ToList()) { if (styleChanged) deck.MorphShape(); else deck.ApplySettings(); }
         QueueSave();
         CollapsedChanged();
         if (dataChanged || syncEnabled || languageChanged) _ = Deck.RefreshAutomaticallyAsync(queueIfBusy: true);
@@ -252,6 +279,165 @@ public partial class App : Application
         foreach (var deck in Decks.ToList()) deck.ApplySettings();
         if (!reload) _settingsWindow?.PanelThemeChanged();
     }
+    // The hourly probe of the configured AI keys. The timer is set for the coming hour rather than a fixed interval, so the
+    // probes follow the clock, and a machine that slept past the hour catches up on waking. A failed probe is retried on
+    // the next hour rather than sooner: the services rate-limit, and the schedule keeps answering in the meantime.
+    private DispatcherTimer? _probe;
+    internal void ScheduleProbes()
+    {
+        var keys = Settings.KeyResets.Where(key => key.Enabled && key.ProbeEnabled).ToList();
+        if (keys.Count == 0) { _probe?.Stop(); return; }
+        if (_probe is null)
+        {
+            _probe = new DispatcherTimer(DispatcherPriority.Background);
+            _probe.Tick += async (_, _) => { _probe.Stop(); await ProbeKeysAsync().ConfigureAwait(true); ScheduleProbes(); };
+        }
+        // Due now (a key that has never been probed, or one whose hour has come) is done at once; otherwise the timer
+        // waits for the coming hour, at most a minute ahead so a slept-through hour is caught on the next tick.
+        var now = DateTimeOffset.Now;
+        bool due = keys.Any(key => KeyProber.Due(key, now));
+        var wait = due ? TimeSpan.FromSeconds(1) : KeyProber.NextHourly(now) - now;
+        _probe.Interval = TimeSpan.FromMilliseconds(Math.Clamp(wait.TotalMilliseconds + 500, 1000, TimeSpan.FromMinutes(61).TotalMilliseconds));
+        _probe.Stop(); _probe.Start();
+    }
+    // Probes every key that is due and writes back what each one learned. The requests run on the pool, so a slow service
+    // never stalls the panel, and the write-back is marshalled to this thread: UpdateSettings touches the panels and the
+    // display assignment, both of which belong to the UI thread, and continuing on the pool after an await (which
+    // ConfigureAwait(false) does) would otherwise reach them from the wrong thread.
+    private async Task ProbeKeysAsync()
+    {
+        var keys = Settings.KeyResets.Where(key => KeyProber.Due(key, DateTimeOffset.Now)).ToList();
+        if (keys.Count == 0) return;
+        var results = new List<(Guid Id, KeyProbeResult Result, DateTimeOffset At)>();
+        foreach (var key in keys)
+        {
+            KeyProbeResult result;
+            try { result = await Prober.ProbeAsync(key, Lifetime.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) when (ex is not OutOfMemoryException) { result = KeyProbeResult.Failed(ex.GetType().Name); }
+            results.Add((key.InstanceId, result, DateTimeOffset.Now));
+        }
+        if (results.Count == 0) return;
+        // Back on the UI thread before anything is written: the settings are read and changed here, and UpdateSettings
+        // lays the panels out, which is work only this thread may do.
+        await Dispatcher.InvokeAsync(() =>
+        {
+            // A probe can take seconds; the settings may have been edited meanwhile, so what is written back is applied to
+            // the current rows by identity rather than replacing the list with the one that was probed.
+            bool changed = false;
+            foreach (var (id, result, at) in results)
+                changed |= Settings.UpdateKey(id, key => key.WithProbe(result, at));
+            if (changed) UpdateSettings(Settings);
+        });
+    }
+    // The client the key probes use. Probes are hourly and tiny, so a short timeout is enough and a hung service is
+    // dropped rather than waited on; the handler is not shared with the quota readers, whose timeouts differ.
+    // The client the calendar and mail readers use. A calendar server can be slow to answer a large query, so the
+// timeout is generous; it is not the probe client, whose requests are tiny and must not wait.
+    private static System.Net.Http.HttpClient AgendaHttp() => new(new System.Net.Http.SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) })
+    {
+        Timeout = TimeSpan.FromSeconds(60)
+    };
+
+    private static System.Net.Http.HttpClient KeyProbeHttp() => new(new System.Net.Http.SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(10) })
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    };
+
+    // A trace of what the calendar reader did, in the data folder. A running panel can be asked what it did this way
+    // without a debugger attached, which is the only practical way to see why a page is empty.
+    internal static void Trace(string line)
+    {
+        foreach (var path in new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BrimDeck", "agenda.log"),
+            Path.Combine(Path.GetTempPath(), "brimdeck-agenda.log")
+        })
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.AppendAllText(path, $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] {line}{Environment.NewLine}");
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+        }
+    }
+
+    // The work calendars and the mailboxes, read on their own cadence. The read happens on the pool; only the
+    // drawing comes back to this thread.
+    private DispatcherTimer? _agenda;
+    // Whether the timer was last told to run. Every settings update asks again, and a read that saves what it learned
+    // causes one, so the answer is compared rather than the timer restarted.
+    private bool _agendaWanted;
+    internal void ScheduleAgenda()
+    {
+        var state = Settings.Agenda;
+        // A subscription is a calendar too: with only holidays set up there is still something to read, and leaving the
+        // subscriber out of this test is why a machine with a holiday feed showed no meetings at all.
+        bool wanted = state.AutoSync && (state.Accounts.Any(account => account.Enabled)
+                                      || state.Subscriptions.Any(subscription => subscription.Enabled && subscription.Url.Length > 0)
+                                      || state.MailAccounts.Any(account => account.Enabled));
+        // Nothing to do when the answer has not changed: this is called on every settings update, and a read that
+        // saves what it learned causes one, so an unconditional restart would schedule itself in a loop.
+        if (wanted == _agendaWanted && (_agenda is null) == !wanted) { if (wanted) _agenda!.Start(); return; }
+        _agendaWanted = wanted;
+        if (!wanted) { _agenda?.Stop(); return; }
+        if (_agenda is null)
+        {
+            _agenda = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(30) };
+            _agenda.Tick += async (_, _) => { await ReadAgendaAsync().ConfigureAwait(true); };
+            // The first read is asked for now rather than at the first tick: a page opened right after the panel starts
+            // would otherwise show nothing for half a minute.
+            _ = Dispatcher.BeginInvoke(new Action(async () =>
+            {
+                try { await ReadAgendaAsync().ConfigureAwait(true); }
+                catch (Exception ex) when (ex is not OutOfMemoryException) { Trace("first read failed: " + ex.GetType().Name + ": " + ex.Message); }
+            }), DispatcherPriority.Background);
+        }
+        _agenda.Stop(); _agenda.Start();
+    }
+
+    // Reads the calendars and the mail, and tells the panels when something changed. A meeting that is about to
+    // start is announced in the island, once, whether it came from a calendar or from a mail.
+    private async Task ReadAgendaAsync()
+    {
+        var state = Settings.Agenda;
+        try
+        {
+            // A trace of what the read found, in the data folder, which is the only place a running panel can be asked what
+            // it did without a debugger attached.
+            if (state.Accounts.Count == 0 && state.Subscriptions.Count == 0)
+                Trace($"no calendar configured: accounts={state.Accounts.Count} subscriptions={state.Subscriptions.Count}");
+            bool changed = await Agenda.RefreshAsync(state, DateTimeOffset.Now, Lifetime.Token).ConfigureAwait(false);
+            Trace($"read: changed={changed} events={Agenda.Events.Count} error='{Agenda.CalendarError}'");
+            // What the page will draw, so a page that shows nothing can be told from a read that found nothing.
+            foreach (var meeting in Agenda.Events.Take(10))
+                Trace($"  {meeting.Start.LocalDateTime:MM-dd HH:mm} [{meeting.Source}] {meeting.Title}");
+            if (changed)
+            {
+                // What the read learned is kept: the calendar collection that was found, and the mail already seen.
+                var copy = Settings.Copy();
+                copy.Agenda = state;
+                UpdateSettings(copy);
+                // The pages are redrawn: a read that found meetings has to show them, and the calendar page is built
+                // from what this service holds rather than from the settings.
+                foreach (var deck in Decks.ToList()) deck.RefreshAgendaPages();
+            }
+            // The meetings that are about to start, and have not been announced.
+            var due = Agenda.DueForReminder(state, DateTimeOffset.Now, TimeSpan.FromMinutes(Settings.ReminderLead));
+            foreach (var meeting in due)
+            {
+                state.Announced.Add(meeting.DedupeKey);
+                if (state.Announced.Count > 200) state.Announced.RemoveRange(0, state.Announced.Count - 200);
+                foreach (var deck in Decks.ToList())
+                    deck.ShowMessage(ChatApp.Feishu, meeting.Title, meeting.When(DateTimeOffset.Now));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is not OutOfMemoryException) { System.Diagnostics.Debug.WriteLine(ex); }
+    }
+
     // A theme with a night look changes look at its hours (PanelThemes.IsNight): the timer is set for the next change, and at
     // most ten minutes ahead, so a clock changed by hand or a machine that slept past the hour catches up soon after. The switch
     // carries a preset clock gradient over, as Windows switching "system" between dark and light does.
