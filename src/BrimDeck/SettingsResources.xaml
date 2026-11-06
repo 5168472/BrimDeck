@@ -317,6 +317,18 @@
       <ScrollViewer x:Name="PART_ContentHost" Background="Transparent" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" Focusable="False"/>
     </ControlTemplate></Setter.Value></Setter>
   </Style>
+  <!-- A secret field. It cannot take SettingsNumber, whose TargetType is TextBox: WPF refuses a style whose target type does
+       not match the element, and the refusal is an exception thrown while the page is being built, which stops the rest of
+       the page from appearing. The same look, with PasswordBox's own template part name. -->
+  <Style x:Key="SettingsSecret" TargetType="PasswordBox">
+    <Setter Property="Foreground" Value="{DynamicResource SettingsTextPrimary}"/><Setter Property="Background" Value="Transparent"/>
+    <Setter Property="CaretBrush" Value="{DynamicResource SettingsAccent}"/><Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="SelectionBrush" Value="#0A84FF"/><Setter Property="FontSize" Value="12"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/><Setter Property="Padding" Value="0"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="PasswordBox">
+      <ScrollViewer x:Name="PART_ContentHost" Background="Transparent" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" Focusable="False"/>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
   <Style x:Key="SettingsTrack" TargetType="RepeatButton">
     <Setter Property="Focusable" Value="False"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RepeatButton">

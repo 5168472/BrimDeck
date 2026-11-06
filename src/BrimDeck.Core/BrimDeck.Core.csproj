@@ -18,6 +18,11 @@
   <ItemGroup>
     <PackageReference Include="Jint" Version="4.16.3" />
     <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <!-- Mail over IMAP: the mailbox readers. MailKit brings IDLE, BODYSTRUCTURE and BODY.PEEK[], and MimeKit the
+         multipart parsing; the panels read only the text parts, so an attachment is never downloaded. -->
+    <PackageReference Include="MailKit" Version="4.18.2" />
+    <!-- iCalendar, for the work calendars: the event model, the recurrence rules and the time zones. -->
+    <PackageReference Include="Ical.Net" Version="5.2.4" />
   </ItemGroup>
 
 </Project>

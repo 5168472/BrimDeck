@@ -82,6 +82,9 @@ public partial class MainWindow
     internal bool IsMusicPage => CurrentPage == DeckPage.Music;
     internal bool IsMonitorPage => CurrentPage == DeckPage.Monitor;
     internal bool IsUsagePage => CurrentPage == DeckPage.Usage;
+    internal bool IsKeysPage => CurrentPage == DeckPage.Keys;
+    internal bool IsCalendarPage => CurrentPage == DeckPage.Calendar;
+    internal bool IsMailPage => CurrentPage == DeckPage.Mail;
     internal CompactMusicLayout? CurrentCompactLayout { get; private set; }
 
     private void InitializeMusic()
@@ -138,7 +141,11 @@ public partial class MainWindow
         bool back = Settings.PageOrder.IndexOf(page) < Settings.PageOrder.IndexOf(before);
         _handover.Send(picture, place, PageContent(page), back ? Handover.Back : Handover.Forward);
     }
-    private FrameworkElement PageContent(DeckPage page) => page switch { DeckPage.Music => MusicContent, DeckPage.Monitor => MonitorContent, _ => UsageContent };
+    private FrameworkElement PageContent(DeckPage page) => page switch
+    {
+        DeckPage.Music => MusicContent, DeckPage.Monitor => MonitorContent, DeckPage.Keys => KeysContent,
+        DeckPage.Calendar => CalendarContent, DeckPage.Mail => MailContent, _ => UsageContent
+    };
     private void ShowPage(DeckPage page, bool animatePage)
     {
         _detailPopup?.Close(); _details = false; _page = page; _musicRenderKey = ""; _handover.Drop();
@@ -174,6 +181,9 @@ public partial class MainWindow
 
     private void MusicPage_Click(object sender, RoutedEventArgs e) => SelectPage(DeckPage.Music);
     private void MonitorPage_Click(object sender, RoutedEventArgs e) => SelectPage(DeckPage.Monitor);
+    private void KeysPage_Click(object sender, RoutedEventArgs e) => SelectPage(DeckPage.Keys);
+    private void CalendarPage_Click(object sender, RoutedEventArgs e) => SelectPage(DeckPage.Calendar);
+    private void MailPage_Click(object sender, RoutedEventArgs e) => SelectPage(DeckPage.Mail);
     // Where the usage page's application tabs start: after the page switch, which holds one 28 DIP button per shown page.
     private double ApplicationPagesLeft(double side) { int pages = DeckPages.Visible(Settings).Count; return side + (pages <= 1 ? 36 : 72 + 29 * (pages - 2)); }
     // The header shared by both pages (see PanelHeader). Its row holds the page's top margin, so the clock, the switch and the
@@ -208,8 +218,12 @@ public partial class MainWindow
             ToolTipService.SetIsEnabled(control, !IsMusicPage);
         PageSwitch.Visibility = _details && IsUsagePage ? Visibility.Collapsed : Visibility.Visible;
         OrderPageButtons();
-        foreach (var (button, page) in new[] { (AIUsageButton, DeckPage.Usage), (MusicPageButton, DeckPage.Music), (MonitorPageButton, DeckPage.Monitor) })
+        // Every page's button is told whether it shows, and whether it is the chosen one. Reading the order rather than
+        // a fixed list is what keeps a page added later from being left out of the switch.
+        foreach (var page in DeckPages.Order)
         {
+            var button = PageButton(page);
+            if (button is null) continue;
             bool current = CurrentPage == page;
             button.Visibility = DeckPages.Shown(Settings, page) ? Visibility.Visible : Visibility.Collapsed;
             button.Foreground = UI.Brush(current ? UI.Primary : UI.Secondary);
@@ -426,7 +440,9 @@ public partial class MainWindow
         // Only a page that was on screen hands over; one that arrives by the page switch or with the panel opening comes in whole.
         bool shown = MusicContent.IsVisible && _expanded && !_preview;
         RefreshStatus();
-        UsageContent.Visibility = Visibility.Collapsed; MonitorContent.Visibility = Visibility.Collapsed; MusicContent.Visibility = Visibility.Visible;
+        // Every other page is hidden by the same call the other pages use, so a page added later cannot be left showing
+        // under this one.
+        ShowOnly(MusicContent);
         ModelToolbar.Visibility = Visibility.Collapsed; ApplicationPages.Visibility = Visibility.Collapsed; ClockLabel.Visibility = Visibility.Visible;
         double h = ContentCanvas.Height, w = ContentCanvas.Width;
         var track = _mediaTrack;

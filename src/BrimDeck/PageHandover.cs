@@ -147,7 +147,15 @@ internal sealed class PageHandover
         }
         content.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
         {
-            if (_version != version) return;
+            // A newer hand-over took over while this one waited. The batch this call put in the layer is still there, and
+            // nothing else would ever take it out: the fade that removes it is started below, and this call is returning
+            // before reaching it. Left alone it stays on screen for ever as a ghost of the page it pictured, which is what
+            // was seen when a page was switched twice before the first switch had finished.
+            if (_version != version)
+            {
+                if (_waiting is { } stale) { Remove(stale); _waiting = null; }
+                return;
+            }
             _holding = null;
             if (motion == Handover.Dissolve) { content.BeginAnimation(UIElement.OpacityProperty, Arrival(Faint, 1, Soft.Short)); return; }
             if (_waiting is not { } batch) return;

@@ -153,14 +153,33 @@ public partial class MainWindow
             DateTime.Now.Ticks / TimeSpan.TicksPerMinute, VisualTreeHelper.GetDpi(this).DpiScaleY, _scale);
     }
 
+    // Redraws the pages built from the agenda service, when a read has brought something new. Only the calendar and the
+// mail are rebuilt: the other pages do not depend on it, and rebuilding them on every read would cost a frame each.
+    internal void RefreshAgendaPages()
+    {
+        if (IsCalendarPage || IsMailPage) RenderUsage();
+    }
+
+    // Shows one page and hides every other. Each page's renderer calls this rather than setting the other pages'
+    // visibility itself: a page added later would otherwise be left showing under the one that was switched to, which
+    // is how the rings stayed visible over the music page.
+    internal void ShowOnly(FrameworkElement page)
+    {
+        foreach (var other in new FrameworkElement[] { UsageContent, MusicContent, MonitorContent, KeysContent, CalendarContent, MailContent })
+            if (other is not null) other.Visibility = ReferenceEquals(other, page) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     public void RenderUsage()
     {
         if (UsageContent is null) return;
         if (IsMusicPage) { RenderMusic(); return; }
         if (IsMonitorPage) { RenderMonitor(); return; }
+        if (IsKeysPage) { RenderKeys(); return; }
+        if (IsCalendarPage) { RenderCalendar(); return; }
+        if (IsMailPage) { RenderMail(); return; }
         // Only a page that was on screen hands over; one that arrives by the page switch or with the panel opening comes in whole.
         bool shown = UsageContent.IsVisible && _expanded && !_preview;
-        MusicContent.Visibility = Visibility.Collapsed; MonitorContent.Visibility = Visibility.Collapsed; UsageContent.Visibility = Visibility.Visible;
+        ShowOnly(UsageContent);
         if (!Settings.UsagePage) _details = false;
         RefreshStatus();
         if (_detailPopup is not null) { _flippedColumn = null; return; }
@@ -325,7 +344,39 @@ public partial class MainWindow
         var grid = new UniformGrid { Columns = count, Rows = 1 };
         for (int i = 0; i < columns.Count; i++)
             grid.Children.Add(Column(columns[i].Entry, columns[i].Quota, columns[i].Usage, views[i], layout, inline, wide, center, i > 0, columnWidth - layout.ColumnPad * 2 - (i > 0 ? 1 : 0)));
-        UsageContent.Children.Add(grid);
+        // The quotas fill the row; the reset strip, when there is one, takes a row of its own under them rather than lying
+        // over them. The fit above was worked out for the whole height, so the strip's row is taken from the grid's share
+        // instead of pushing the page into a taller one.
+        var keys = KeyResets();
+        var host = new Grid();
+        host.RowDefinitions.Add(new RowDefinition());
+        if (keys.Count > 0) host.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(grid, 0); host.Children.Add(grid);
+        if (keys.Count > 0)
+        {
+            var strip = KeyResetStrip(keys);
+            Grid.SetRow(strip, 1); host.Children.Add(strip);
+        }
+        UsageContent.Children.Add(host);
+    }
+
+    private List<KeyReset> KeyResets() => Settings.KeyResets.Where(key => key.Enabled).ToList();
+
+    // A one-line summary under the quota columns, shown only when the keys page itself is off: the keys stay visible on the
+    // page they used to share with the quotas, without taking a page of their own. The keys page's own rows carry the
+    // detail; this is a pointer to it, so it is the smallest text the page uses and never takes more than one line.
+    private FrameworkElement KeyResetStrip(IReadOnlyList<KeyReset> keys)
+    {
+        // With the keys page shown, the rows live there and this would only repeat them.
+        if (Settings.KeysPage && DeckPages.Shown(Settings, DeckPage.Keys)) return new Border { Height = 0 };
+        var now = DateTimeOffset.Now;
+        var parts = keys.Select(key => key.NextReset(now) is { } at
+            ? $"{key.DisplayName} {at.LocalDateTime:MM-dd HH:mm}"
+            : Loc.T($"{key.DisplayName} 时间未知", $"{key.DisplayName} unknown"));
+        var line = UI.Centered(string.Join("    ", parts), 10, UI.Tertiary);
+        line.Margin = new Thickness(0, 6, 0, 0);
+        line.ToolTip = Loc.T("密钥页已关闭时在这里列出。", "Listed here because the keys page is off.");
+        return line;
     }
 
     // Before its first reading a quota has its defaults: nothing read, no time, and the label and the detail alike.

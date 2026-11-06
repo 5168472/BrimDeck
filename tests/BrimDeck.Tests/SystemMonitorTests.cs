@@ -309,17 +309,26 @@ static class SystemMonitorTests
         settings.MonitorPage = false;
         check("Pages: the music page alone", DeckPages.Resolve(settings, DeckPage.Monitor) == DeckPage.Music);
         settings.MusicPage = false;
+        // Every page off, including the ones added later: the usage page is what is left, and it says that it is off.
+        settings.KeysPage = false; settings.CalendarPage = false; settings.MailPage = false;
         check("Pages: with every page off the usage page says so", DeckPages.Resolve(settings, DeckPage.Music) == DeckPage.Usage && DeckPages.Visible(settings).Count == 0);
         var ordered = new DeckSettings { PageOrder = [DeckPage.Monitor, DeckPage.Usage, DeckPage.Music] };
+        // The keys page needs a key and the calendar and the mail a switch, so only the three are shown here.
+        ordered.KeysPage = false; ordered.CalendarPage = false; ordered.MailPage = false;
         check("Pages: the switch follows the chosen order", DeckPages.Visible(ordered).SequenceEqual([DeckPage.Monitor, DeckPage.Usage, DeckPage.Music]));
         ordered.MonitorPage = false;
         check("Pages: a hidden page falls back to the first shown one in the chosen order", DeckPages.Resolve(ordered, DeckPage.Monitor) == DeckPage.Usage);
         var odd = System.Text.Json.JsonSerializer.Deserialize<DeckSettings>("""{"PageOrder":[2,9,2]}""")!;
-        check("Pages: unknown and repeated pages are dropped and missing ones added", odd.PageOrder.SequenceEqual([DeckPage.Monitor, DeckPage.Usage, DeckPage.Music]));
+        // The saved order comes first, with repeats and unknown numbers dropped; every page the file does not name follows
+        // in its default order. With the pages added since, that means Monitor, then Usage, Keys, Music, Calendar, Mail.
+        check("Pages: unknown and repeated pages are dropped and missing ones added",
+            odd.PageOrder.SequenceEqual([DeckPage.Monitor, DeckPage.Usage, DeckPage.Keys, DeckPage.Music, DeckPage.Calendar, DeckPage.Mail]));
         var copy = ordered.Copy(); copy.PageOrder = [.. DeckPages.Order];
         var orderRead = System.Text.Json.JsonSerializer.Deserialize<DeckSettings>(System.Text.Json.JsonSerializer.Serialize(ordered))!;
-        check("Pages: the order is copied deeply and survives saving and reading", ordered.PageOrder[0] == DeckPage.Monitor && orderRead.PageOrder.SequenceEqual([DeckPage.Monitor, DeckPage.Usage, DeckPage.Music])
-            && new DeckSettings().PageOrder.SequenceEqual(DeckPages.Order));
+        // Reading the file back appends the pages it did not name, so the keys page follows the three that were saved.
+        check("Pages: the order is copied deeply and survives saving and reading",
+            ordered.PageOrder[0] == DeckPage.Monitor && orderRead.PageOrder.Take(3).SequenceEqual([DeckPage.Monitor, DeckPage.Usage, DeckPage.Music])
+            && orderRead.PageOrder.Contains(DeckPage.Keys) && new DeckSettings().PageOrder.SequenceEqual(DeckPages.Order));
         var wheelOff = System.Text.Json.JsonSerializer.Deserialize<DeckSettings>("""{"MouseWheelPages":false}""")!; wheelOff.Normalize();
         var wheelOn = System.Text.Json.JsonSerializer.Deserialize<DeckSettings>("""{"MouseWheelPages":true}""")!; wheelOn.Normalize();
         check("The wheel: an older file's switch is carried across and then left out of the file",
@@ -329,6 +338,8 @@ static class SystemMonitorTests
         check("Pages: opening choices", DeckPages.Opening(DefaultDeckPage.Monitor) == DeckPage.Monitor && DeckPages.Opening(DefaultDeckPage.Last) is null
             && DeckPages.Opening(DefaultDeckPage.Usage) == DeckPage.Usage && DeckPages.Opening(DefaultDeckPage.Music) == DeckPage.Music);
         var sizes = new DeckSettings { Width = 500, Height = 150, MusicWidth = 700, MusicHeight = 180, MonitorWidth = 600, MonitorHeight = 300 };
+        // The newer pages are off, so only the sizes of the three that are on are in play.
+        sizes.KeysPage = false; sizes.CalendarPage = false; sizes.MailPage = false;
         check("Pages: the window holds the largest shown page", DeckPages.Largest(sizes) == (700, 300));
         sizes.MusicPage = false; sizes.MonitorPage = false;
         check("Pages: only shown pages size the window", DeckPages.Largest(sizes) == (Math.Max(500, sizes.MinimumWidth), 150));

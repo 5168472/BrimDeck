@@ -29,10 +29,12 @@ public sealed partial class SettingsWindow : Window
     private readonly TextBlock _status = new() { Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
     private ScrollViewer _scroll = null!;
     private static string[] _pages => [Loc.T("常规", "General"), Loc.T("收起外观", "Collapsed view"), Loc.T("展开外观", "Expanded view"),
-        Loc.T("配额与统计", "Quotas and usage"), Loc.T("模型价格", "Model prices"), Loc.T("样式", "Style"), Loc.T("播放器", "Players"), Loc.T("关于 BrimDeck", "About BrimDeck"), Loc.T("面板主题", "Panel theme"), Loc.T("显示与读数", "Display and readings"), Loc.T("增强传感器", "Enhanced sensors")];
+        Loc.T("配额与统计", "Quotas and usage"), Loc.T("模型价格", "Model prices"), Loc.T("样式", "Style"), Loc.T("播放器", "Players"), Loc.T("关于 BrimDeck", "About BrimDeck"), Loc.T("面板主题", "Panel theme"), Loc.T("显示与读数", "Display and readings"), Loc.T("增强传感器", "Enhanced sensors"), Loc.T("消息提示", "Message notices"), Loc.T("日程", "Calendar"), Loc.T("邮件", "Mailbox")];
     // The order of the pages in the navigation; the theme page (ThemePage) is listed with the appearance pages, and the system
-    // monitor's page (MonitorSettingsPage) has its own group after music, before About.
-    private static readonly int[] PageOrder = [0, 1, 2, ThemePage, 3, 4, 5, 6, MonitorSettingsPage, SensorsPage, 7];
+    // monitor's page (MonitorSettingsPage) has its own group after music, before About. The calendar and the mailbox are pages
+    // of their own rather than part of the messages page: each has its own accounts, and a reader setting one up is not
+    // looking for the notice switches.
+    private static readonly int[] PageOrder = [0, 1, 2, ThemePage, 3, 4, 5, 6, MonitorSettingsPage, SensorsPage, MessagesPage, CalendarPage, MailPage, 7];
     private int _page;
     private bool _preview;
     private StackPanel? _appRows;
@@ -320,9 +322,9 @@ public sealed partial class SettingsWindow : Window
         _page = page; _navigation.Children.Clear(); _content.Children.Clear(); _aboutUpdateView = null; _scroll.ScrollToTop();
         foreach (int i in PageOrder)
         {
-            if (i is 0 or 3 or 5 or 7 or MonitorSettingsPage)
+            if (i is 0 or 3 or 5 or 7 or MonitorSettingsPage or MessagesPage)
             {
-                var group = TextLine(i switch { 0 => Loc.T("基础设置", "Basics"), 3 => Loc.T("AI 用量", "AI usage"), MonitorSettingsPage => Loc.T("系统监控", "System monitor"), 5 => Loc.T("音乐", "Music"), _ => Loc.T("关于", "About") },10.5,TextTertiary);
+                var group = TextLine(i switch { 0 => Loc.T("基础设置", "Basics"), 3 => Loc.T("AI 用量", "AI usage"), MonitorSettingsPage => Loc.T("系统监控", "System monitor"), MessagesPage => Loc.T("消息与日程", "Messages, calendar and mail"), 5 => Loc.T("音乐", "Music"), _ => Loc.T("关于", "About") },10.5,TextTertiary);
                 group.Margin = new Thickness(12, i == 0 ? 0 : 24, 0, 8); _navigation.Children.Add(group);
             }
             int target=i; bool selected=page==i;
@@ -343,7 +345,7 @@ public sealed partial class SettingsWindow : Window
             var reset=ActionButton(Loc.T("恢复默认", "Restore defaults"),()=>{ if(Confirm(Loc.T("恢复默认", "Restore defaults"),ResetConfirmText(page),Loc.T("恢复默认", "Restore defaults")))ResetPage(); }); reset.FontSize=11; DockPanel.SetDock(reset,Dock.Right); head.Children.Add(reset);
         }
         head.Children.Add(page == 7 ? Wordmark(28) : TextLine(_pages[page],24,TextPrimary,FontWeights.SemiBold)); _content.Children.Add(head);
-        switch(page) { case 0: General(); break; case 1: Compact(); break; case 2: Expanded(); break; case 3: Pages(); break; case 4: ModelPrices(); break; case 5: MusicStyle(); break; case 6: Players(); break; case 7: About(); break; case ThemePage: ThemesPage(); break; case MonitorSettingsPage: MonitorSettings(); break; case SensorsPage: SensorsSettings(); break; }
+        switch(page) { case 0: General(); break; case 1: Compact(); break; case 2: Expanded(); break; case 3: Pages(); break; case 4: ModelPrices(); break; case 5: MusicStyle(); break; case 6: Players(); break; case 7: About(); break; case ThemePage: ThemesPage(); break; case MonitorSettingsPage: MonitorSettings(); break; case SensorsPage: SensorsSettings(); break; case MessagesPage: Messages(); break; case CalendarPage: CalendarSettingsPage(); break; case MailPage: MailSettingsPage(); break; }
         if (_content.Children[^1] is Border lastGroup) lastGroup.Margin = new Thickness(lastGroup.Margin.Left, lastGroup.Margin.Top, lastGroup.Margin.Right, 0);
         // Apply the offset before the frame is drawn, so the rebuilt page never shows its top for a frame.
         if (keep > 0) { _scroll.UpdateLayout(); _scroll.ScrollToVerticalOffset(keep); _scroll.UpdateLayout(); }
@@ -361,6 +363,9 @@ public sealed partial class SettingsWindow : Window
         6 => "M 1,2 H 15 V 14 H 1 Z M 6.5,5.5 L 11,8 L 6.5,10.5 Z",
         MonitorSettingsPage => "M 1,9 H 4 L 6,4 L 9,13 L 11,7 L 12,9 H 15",
         SensorsPage => "M 4,4 H 12 V 12 H 4 Z M 6,1 V 4 M 10,1 V 4 M 6,12 V 15 M 10,12 V 15 M 1,6 H 4 M 1,10 H 4 M 12,6 H 15 M 12,10 H 15",
+        MessagesPage => "M 1,3 H 15 V 12 H 5 L 1,15 V 3 Z M 4,6.5 H 12 M 4,9 H 9",
+        CalendarPage => "M 2.5,4 H 13.5 V 14 H 2.5 Z M 2.5,7.5 H 13.5 M 5.5,2 V 5 M 10.5,2 V 5 M 5,10 H 7 M 9,10 H 11",
+        MailPage => "M 1,4 H 15 V 12.5 H 1 Z M 1,4 L 8,9 L 15,4",
         ThemePage => "M 8,1 C 4,1 1,4 1,8 C 1,12 4,15 8,15 C 9.4,15 9.6,13.6 8.8,12.8 C 8,12 8.6,10.5 10,10.5 H 12 C 13.7,10.5 15,9.2 15,7.5 C 15,4 12,1 8,1 Z M 4.6,8 V 8.1 M 6,4.8 V 4.9 M 9.6,4.4 V 4.5 M 12,6.8 V 6.9",
         5 => "M 6,12.5 V 3 L 14,1.5 V 11 M 6,12.5 A 2,2 0 1 1 2,12.5 A 2,2 0 1 1 6,12.5 M 14,11 A 2,2 0 1 1 10,11 A 2,2 0 1 1 14,11",
         _ => "M 8,1 A 7,7 0 1 1 7.99,1 M 8,7 V 12 M 8,4 V 4.2"
@@ -518,6 +523,14 @@ public sealed partial class SettingsWindow : Window
             {
                 DeckPage.Music => SizeRow(Loc.T("显示音乐", "Show music"), Loc.T("音乐", "music"), page, S.MusicPage, value => { Change(s => s.MusicPage = value); FillStarts(); }, Collect(MusicSizeControls), pages, FillStarts),
                 DeckPage.Monitor => SizeRow(Loc.T("显示系统监控", "Show system monitor"), Loc.T("系统监控", "system monitor"), page, S.MonitorPage, value => { Change(s => s.MonitorPage = value); FillStarts(); }, Collect(MonitorSizeControls), pages, FillStarts),
+                // The keys page also needs a key to show, so its switch is off here with a list of keys it has none of.
+                DeckPage.Keys => SizeRow(Loc.T("显示额度环", "Show allowance rings"), Loc.T("额度环", "Allowance rings"), page, S.KeysPage,
+                    value => { Change(s => s.KeysPage = value); FillStarts(); }, Collect(KeysSizeControls), pages, FillStarts),
+                // The calendar and the mail pages need an account on them, so their switches are off with none.
+                DeckPage.Calendar => SizeRow(Loc.T("显示日程", "Show calendar"), Loc.T("日程", "Calendar"), page, S.CalendarPage,
+                    value => { Change(s => s.CalendarPage = value); FillStarts(); }, Collect(CalendarSizeControls), pages, FillStarts),
+                DeckPage.Mail => SizeRow(Loc.T("显示邮件", "Show mail"), Loc.T("邮件", "Mail"), page, S.MailPage,
+                    value => { Change(s => s.MailPage = value); FillStarts(); }, Collect(MailSizeControls), pages, FillStarts),
                 _ => SizeRow(Loc.T("显示 AI 用量", "Show AI usage"), Loc.T("AI 用量", "AI usage"), page, S.UsagePage, value => { Change(s => s.UsagePage = value); FillStarts(); }, Collect(UsageSizes), pages, FillStarts)
             });
         UpdateDividers(pages);
@@ -613,6 +626,12 @@ public sealed partial class SettingsWindow : Window
             sizes.Children.Add(choice);
         }
         QuickSizeRow(sizes);
+        // The lock is a switch of its own rather than a size: a panel that has been sized and placed is easy to catch
+        // with the pointer on the screen's edge, and a locked one cannot be changed that way at all.
+        Target.Children.Add(Toggle(Loc.T("锁定尺寸", "Lock the size"), S.SizeLocked,
+            on => Resize(s => s.SizeLocked = on),
+            help: Loc.T("锁定后拖动边缘不会改变大小，快捷尺寸和宽度、高度仍然可用。要再手动缩放，先在这里解锁。",
+                "Locked, dragging the edges does not change the size; the quick sizes and the width and height still apply. Unlock here to drag it again.")));
     }
     // What the "restore defaults" confirmation says. The quota page also puts the application list back (ResetPage, case 3), which removes the applications
     // the user added and their quota sources, the largest loss of any page, so it says so.
@@ -1087,10 +1106,12 @@ public sealed partial class SettingsWindow : Window
         var current = TextLine(_app.Updates.CurrentVersion,12,TextSecondary); current.VerticalAlignment = VerticalAlignment.Center; version.Children.Add(current);
         var notes = ActionButton(Loc.T("更新内容", "What's new"), ShowReleaseNotes); notes.Style = (Style)FindResource("SettingsLink"); notes.Margin = new Thickness(14, 0, 0, 0);
         version.Children.Add(notes);
+        // This build's own repository: it carries changes the upstream project does not have, so its homepage and its
+        // issues belong here. The license and the upstream project stay credited on the licence row above.
         Group(Row(Loc.T("当前版本", "Current version"),version),
-            Row(Loc.T("开源许可证", "License"),TextLine("Apache License 2.0",12,TextSecondary)),
-            Row(Loc.T("项目主页", "Homepage"),Link("GitHub ↗","https://github.com/MoFeng2223/BrimDeck")),
-            Row(Loc.T("问题与建议", "Issues and suggestions"),Link(Loc.T("提交反馈 ↗", "Send feedback ↗"),"https://github.com/MoFeng2223/BrimDeck/issues")));
+            Row(Loc.T("开源许可证", "License"),TextLine(Loc.T("Apache License 2.0 · 基于 MoFeng2223/BrimDeck", "Apache License 2.0 · from MoFeng2223/BrimDeck"),12,TextSecondary)),
+            Row(Loc.T("项目主页", "Homepage"),Link("GitHub ↗","https://github.com/5168472/BrimDeck")),
+            Row(Loc.T("问题与建议", "Issues and suggestions"),Link(Loc.T("提交反馈 ↗", "Send feedback ↗"),"https://github.com/5168472/BrimDeck/issues")));
     }
 
     // External links are plain text, so their right edge lines up with the values in the rows above.

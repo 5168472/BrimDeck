@@ -39,5 +39,8 @@
     <Compile Include="..\..\src\BrimDeck\IslandBorder.cs" Link="IslandBorder.cs" />
     <Compile Include="..\..\src\BrimDeck\IslandDecor.cs" Link="IslandDecor.cs" />
     <Compile Include="..\..\src\BrimDeck\PageToolTips.cs" Link="PageToolTips.cs" />
+    <!-- The chat readers and the watcher, checked against the clients that are actually running. -->
+    <Compile Include="..\..\src\BrimDeck\Native\UnreadCountSource.cs" Link="UnreadCountSource.cs" />
+    <Compile Include="..\..\src\BrimDeck\MessageWatcher.cs" Link="MessageWatcher.cs" />
   </ItemGroup>
 </Project>
